@@ -617,6 +617,7 @@ const EGG_FOOD_KW = [
   '소보로빵','크로와상','카스테라','돈까스','돈가스',
   '케이크','머핀','와플','쿠키','팬케이크','핫케이크',
   '스크램블','오믈렛',
+  '마요','마요네즈','에그',
 ];
 
 /**
@@ -641,10 +642,10 @@ function parseAllergenStr(numStr) {
     const d = digits[i];
     if (d === 0) return solve(i + 1, prev); // 0은 알레르기 번호 없음
 
-    // 2자리 시도 (10~19), 오름차순 조건 충족 시
+    // 2자리 시도 (10~19), 오름차순 조건 충족 시 (중복 허용: >=)
     if (d === 1 && i + 1 < digits.length) {
       const two = 10 + digits[i + 1];
-      if (two > prev) {
+      if (two >= prev) {
         const rest = solve(i + 2, two);
         if (rest !== null) return [two, ...rest];
       }
@@ -716,7 +717,7 @@ function detectEgg(text) {
 
   // ④ 음식명+숫자 직접 붙은 형식: "게살달걀찜1568", "소보로빵1246"
   //    오름차순 파싱으로 10~19번 vs 1번+x번 구분
-  for (const m of text.matchAll(/[\uAC00-\uD7A3a-zA-Z]+\s*([\d]{1,12})/g)) {
+  for (const m of text.matchAll(/[\uAC00-\uD7A3a-zA-Z]+\s*(\d+)/g)) {
     if (parseAllergenStr(m[1]).includes(1)) return true;
   }
 
