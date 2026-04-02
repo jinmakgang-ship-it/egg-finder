@@ -1154,8 +1154,6 @@ async function saveMonthly() {
     batch.push({ date, hasEgg: meal.hasEgg, menus: meal.menus, rawText: meal.rawText });
   }
   DB.save(meals);
-  await gasPost({ type: 'batchMeals', meals: batch });
-
   const year  = document.getElementById('mealYear').value;
   const month = document.getElementById('mealMonth').value;
   const eggEntries  = Object.entries(pendingMonthly).filter(([, m]) => m.hasEgg).sort((a, b) => a[0].localeCompare(b[0]));
@@ -1177,7 +1175,15 @@ async function saveMonthly() {
   }
 
   msg += '\n\n🔗 https://jinmakgang-ship-it.github.io/egg-finder/';
-  tgSend(msg);
+
+  // batchMeals 저장과 동시에 GAS에서 전체 기기로 알림 발송
+  const cfg2 = DB.cfg();
+  if (cfg2.gasUrl) {
+    await gasPost({ type: 'batchMeals', meals: batch, message: msg });
+  } else {
+    await gasPost({ type: 'batchMeals', meals: batch });
+    tgSend(msg);
+  }
 
   pendingMonthly = null;
   document.getElementById('monthlyResult').style.display = 'none';
