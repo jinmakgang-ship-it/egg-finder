@@ -218,9 +218,10 @@ if (!cfg.gasUrl) {
 
 **원인**: GAS에는 `tgChatIds` 배열에 모든 기기의 Chat ID가 등록되어 있지만, 업로드 알림은 GAS를 거치지 않고 브라우저에서 직접 발송
 
-**수정**:
-- `Code.gs`: `doPost`에 `type: 'broadcast'` 타입 추가 → 서버에 저장된 `tgChatIds` 전체에 메시지 발송
-- `index.html` `saveMonthly()`: `gasUrl`이 있으면 `gasPost({ type: 'broadcast', message: msg })`로 서버 브로드캐스트, 없으면 기존 `tgSend()` 폴백
+**최종 수정** (별도 `broadcast` 엔드포인트 방식은 GAS 실행 환경 문제로 불안정):
+- `Code.gs` `batchMeals` 핸들러: `data.message`가 있으면 저장 후 `tgChatIds` 전체에 즉시 발송
+- `index.html` `saveMonthly()`: `gasUrl`이 있으면 `gasPost({ type: 'batchMeals', meals, message: msg })`로 저장+알림 한 번에 처리, 없으면 저장 후 `tgSend()` 폴백
+- 저장과 알림을 동일 GAS 실행 컨텍스트에서 처리 → 안정적
 
 ---
 
@@ -237,7 +238,7 @@ if (!cfg.gasUrl) {
 
 ### 알림 흐름
 ```
-GAS 트리거 (매일 09:00 KST)
+GAS 트리거 (매일 08:00 KST)
   → sendDailyNotif()
   → getMeal(오늘) + getMeal(내일)
   → 오늘 리마인드 + 내일 알림 메시지 조합
@@ -254,6 +255,21 @@ GAS 트리거 (매 1분)
 - `오전간식` / `오후간식`: 표에서 **1행**만 차지 → THIN_SLOT으로 처리
 - `점심`: 밥+국+반찬+김치로 **다중 행** 차지 → 라벨보다 음식이 위에 먼저 인식될 수 있음
 - 알레르기 표가 표 오른쪽에 위치 → 같은 Y좌표에 섞여 슬롯 라벨 위치 오염 가능
+
+---
+
+## 2026-04-03 매일 알림 미발송 버그 수정
+
+**증상**: 오전 9시 알림이 오지 않음
+
+**원인 1 — `sendDailyNotif` 조기 종료 조건 오류**
+- `if (!cfg.tgToken || !cfg.tgChatId) return;` 에서 `tgChatId`(단일값)가 비어있으면 즉시 종료
+- 실제 발송은 `tgChatIds`(배열) 기반인데 이 검사만 통과하면 배열이 있어도 알림 안 감
+- **수정**: 조건을 `chatIds` 배열로 계산 후 길이 검사로 변경
+
+**원인 2 — 내일 식단 없으면 오늘 알림도 스킵**
+- `const meal = getMeal(tmrStr); if (!meal) return;`에서 내일 식단 미등록 시 오늘 알림도 안 보냄
+- **수정**: `if (!meal)` return 제거 → `tomorrowSection`에서 `!meal`이면 "📭 식단 미등록" 표시로 분기
 
 ---
 

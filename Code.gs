@@ -59,6 +59,15 @@ function doPost(e) {
       return ok();
     } else if (data.type === 'batchMeals') {
       for (const meal of (data.meals || [])) saveMeal(meal);
+      if (data.message) {
+        const cfg = getConfig();
+        if (cfg.tgToken) {
+          const chatIds = cfg.tgChatIds.length ? cfg.tgChatIds : (cfg.tgChatId ? [cfg.tgChatId] : []);
+          chatIds.forEach(function(id) {
+            try { sendTelegram(cfg.tgToken, id, data.message); } catch(e) {}
+          });
+        }
+      }
       return ok();
     } else if (data.type === 'getMeals') {
       const sheet  = getSheet();
@@ -78,6 +87,15 @@ function doPost(e) {
       return ContentService
         .createTextOutput(JSON.stringify({ ok: true, meals }))
         .setMimeType(ContentService.MimeType.JSON);
+    } else if (data.type === 'broadcast') {
+      const cfg = getConfig();
+      if (cfg.tgToken && data.message) {
+        const chatIds = cfg.tgChatIds.length ? cfg.tgChatIds : (cfg.tgChatId ? [cfg.tgChatId] : []);
+        chatIds.forEach(function(id) {
+          try { sendTelegram(cfg.tgToken, id, data.message); } catch(e) {}
+        });
+      }
+      return ok();
     } else if (data.type === 'ocr') {
       const result = callClovaOcr(data.imageBase64, data.mimeType);
       return ContentService
@@ -379,7 +397,8 @@ function getSubstitutes(menus) {
 ══════════════════════════════════════════ */
 function sendDailyNotif() {
   const cfg = getConfig();
-  if (!cfg.tgToken || !cfg.tgChatId) return;
+  const chatIds = cfg.tgChatIds.length ? cfg.tgChatIds : (cfg.tgChatId ? [cfg.tgChatId] : []);
+  if (!cfg.tgToken || !chatIds.length) return;
 
   const today = new Date();
   const todayStr = fmtDate(today);
@@ -388,7 +407,6 @@ function sendDailyNotif() {
   const tmrStr = fmtDate(tomorrow);
 
   const meal = getMeal(tmrStr);
-  if (!meal) return;
 
   const DAYS = ['일', '월', '화', '수', '목', '금', '토'];
   const dl = `${tomorrow.getMonth() + 1}월 ${tomorrow.getDate()}일 (${DAYS[tomorrow.getDay()]})`;
@@ -412,7 +430,9 @@ function sendDailyNotif() {
   }
 
   let tomorrowSection;
-  if (meal.hasEgg) {
+  if (!meal) {
+    tomorrowSection = `📅 내일(${dl})\n📭 식단 미등록`;
+  } else if (meal.hasEgg) {
     const list = meal.menus && meal.menus.length
       ? meal.menus.map(function(m) {
           const numStr = m.allergens && m.allergens.length ? ` [${m.allergens.join(',')}번]` : '';
@@ -435,7 +455,6 @@ function sendDailyNotif() {
 
   const msg = `🥚 어린이집 계란 알림\n\n${todaySection}\n\n${tomorrowSection}\n\n🔗 https://jinmakgang-ship-it.github.io/egg-finder/`;
 
-  const chatIds = cfg.tgChatIds.length ? cfg.tgChatIds : (cfg.tgChatId ? [cfg.tgChatId] : []);
   chatIds.forEach(function(id) { sendTelegram(cfg.tgToken, id, msg); });
 }
 
@@ -453,11 +472,11 @@ function installTrigger() {
   ScriptApp.getProjectTriggers().forEach(function(t) {
     ScriptApp.deleteTrigger(t);
   });
-  // 매일 오전 9시(KST) 알림 트리거
+  // 매일 오전 8시(KST) 알림 트리거
   ScriptApp.newTrigger('sendDailyNotif')
     .timeBased()
     .everyDays(1)
-    .atHour(9)
+    .atHour(8)
     .inTimezone('Asia/Seoul')
     .create();
   // 1분마다 Telegram 폴링
