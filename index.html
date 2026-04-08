@@ -514,6 +514,15 @@ textarea:focus { border-color: var(--primary); }
   </div>
 
   <div class="card">
+    <div style="font-size:17px;font-weight:800;margin-bottom:6px">🤖 Gemini AI 계란 감지</div>
+    <div style="font-size:13px;color:var(--text-sub);margin-bottom:16px">키워드·알레르기 번호로 감지 못한 새로운 메뉴를 Gemini AI가 자동으로 추가 확인해요. 한번 판단한 결과는 캐시에 저장되어 API 호출을 최소화합니다.</div>
+    <div class="field-label">Gemini API Key</div>
+    <input type="password" class="setting-input" id="geminiKey" placeholder="AIzaSy..." />
+    <button class="btn btn-primary" onclick="saveGeminiSettings()">AI 설정 저장</button>
+    <div style="font-size:12px;color:var(--text-sub);margin-top:10px">📌 <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:var(--primary)">Google AI Studio</a>에서 무료 발급</div>
+  </div>
+
+  <div class="card">
     <div style="font-size:17px;font-weight:800;margin-bottom:14px">📖 사용법</div>
     <div class="guide-box">
       <strong>1단계 — 텔레그램 봇 만들기</strong><br>
@@ -618,6 +627,7 @@ const EGG_FOOD_KW = [
   '케이크','머핀','와플','쿠키','팬케이크','핫케이크',
   '스크램블','오믈렛',
   '마요','마요네즈','에그',
+  '마카로니샐러드','감자샐러드', // 마요네즈 베이스 샐러드 → 계란 포함
 ];
 
 /**
@@ -1071,6 +1081,42 @@ function parseMonthlyTable(tables, year, month) {
 let pending = null;
 let pendingMonthly = null;
 
+/**
+ * rawText("슬롯명: 음식1 번호 음식2\n...")에서 한글 음식명만 추출
+ * 알레르기 번호·특수문자 제거 후 2글자 이상 한글 포함 항목만 반환
+ */
+function extractFoodNamesFromRaw(rawText) {
+  const names = new Set();
+  for (const line of (rawText || '').split('\n')) {
+    const content = line.replace(/^[^:]+:\s*/, '');
+    if (!content) continue;
+    const sep = content.includes(',') ? /[,，]/ : /\s+(?=[^\d])/;
+    for (const item of content.split(sep)) {
+      const name = cleanMenuName(item.trim());
+      if (name && name.length >= 2 && /[\uAC00-\uD7A3]/.test(name)) names.add(name);
+    }
+  }
+  return [...names];
+}
+
+/** GAS 프록시를 통해 Gemini에 계란 포함 여부 질의 */
+async function checkEggByAI(foodNames) {
+  const cfg = DB.cfg();
+  if (!cfg.gasUrl || !foodNames.length) return {};
+  try {
+    const res = await fetch(cfg.gasUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify({ type: 'checkEgg', foods: foodNames }),
+    });
+    const data = await res.json();
+    return data.ok ? (data.results || {}) : {};
+  } catch(e) {
+    console.error('[AI 계란 체크 오류]', e);
+    return {};
+  }
+}
+
 async function analyzeMonthly() {
   if (!imgB64) { toast('사진을 먼저 선택해 주세요'); return; }
   const year  = parseInt(document.getElementById('mealYear').value);
@@ -1078,9 +1124,8 @@ async function analyzeMonthly() {
 
   setBtnLoading(true);
   const ocrData = await ocrImageFull(imgB64, imgMime);
-  setBtnLoading(false);
 
-  if (!ocrData) { toast('OCR 오류 — CLOVA 설정을 확인해 주세요'); return; }
+  if (!ocrData) { setBtnLoading(false); toast('OCR 오류 — CLOVA 설정을 확인해 주세요'); return; }
 
   const img    = ocrData.images?.[0];
   const tables = img?.tables;
@@ -1091,14 +1136,55 @@ async function analyzeMonthly() {
   } else if (fields && fields.length) {
     pendingMonthly = parseMonthlyFromFields(fields, year, month);
   } else {
+    setBtnLoading(false);
     toast('식단 인식 실패 — 식단표 사진인지 확인해 주세요');
     return;
   }
 
   if (!Object.keys(pendingMonthly).length) {
+    setBtnLoading(false);
     toast('날짜 인식 실패 — 식단표 사진을 확인해 주세요');
     return;
   }
+
+  // ── AI 보조 검사: 1·2단계에서 감지 못한 메뉴를 Gemini로 추가 확인 ──
+  const cfg = DB.cfg();
+  if (cfg.gasUrl) {
+    // 계란 미감지 날의 모든 음식명 수집
+    const toCheck = new Set();
+    for (const meal of Object.values(pendingMonthly)) {
+      if (!meal.hasEgg) {
+        for (const name of extractFoodNamesFromRaw(meal.rawText)) toCheck.add(name);
+      }
+    }
+
+    if (toCheck.size > 0) {
+      toast('🤖 Gemini AI 계란 검사 중... 잠시만요');
+      const aiResult = await checkEggByAI([...toCheck]);
+
+      // AI 결과를 pendingMonthly에 반영
+      for (const meal of Object.values(pendingMonthly)) {
+        if (meal.hasEgg) continue;
+        for (const line of (meal.rawText || '').split('\n')) {
+          const sm = line.match(/^([^:]+):\s*(.*)/);
+          if (!sm) continue;
+          const slot = sm[1].trim();
+          const content = sm[2];
+          const sep = content.includes(',') ? /[,，]/ : /\s+(?=[^\d])/;
+          for (const item of content.split(sep)) {
+            const name = cleanMenuName(item.trim());
+            if (name && aiResult[name]) {
+              meal.hasEgg = true;
+              if (!meal.menus.find(m => m.menu === name))
+                meal.menus.push({ slot, menu: name, allergens: [], ai: true });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  setBtnLoading(false);
   showMonthlyResult(pendingMonthly, month);
 }
 
@@ -1126,7 +1212,7 @@ function showMonthlyResult(results, month) {
     for (const [date, meal] of eggDays) {
       const d = new Date(date + 'T00:00:00');
       const lbl = `${d.getDate()}일 (${DAYS[d.getDay()]})`;
-      const menuStr = meal.menus.length ? meal.menus.map(m => m.menu).join(', ') : '계란 포함';
+      const menuStr = meal.menus.length ? meal.menus.map(m => m.ai ? m.menu + ' 🤖' : m.menu).join(', ') : '계란 포함';
       html += `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:.5px solid var(--border)">
         <span style="font-size:18px">🥚</span>
         <div>
@@ -1613,6 +1699,17 @@ function saveOcrSettings() {
   }
 }
 
+function saveGeminiSettings() {
+  const cfg = DB.cfg();
+  cfg.geminiKey = document.getElementById('geminiKey').value.trim();
+  DB.saveCfg(cfg);
+  toast('AI 설정이 저장되었어요!');
+  // GAS에도 동기화하여 서버측 API 호출에 사용
+  if (cfg.gasUrl && cfg.geminiKey) {
+    gasPost({ type: 'config', geminiKey: cfg.geminiKey });
+  }
+}
+
 function clearAll() {
   if (confirm('모든 식단 데이터를 삭제할까요?')) {
     localStorage.removeItem('meals');
@@ -1674,6 +1771,7 @@ function init() {
   if (cfg.clovaUrl)   document.getElementById('clovaUrl').value   = cfg.clovaUrl;
   if (cfg.clovaSecret)document.getElementById('clovaSecret').value= cfg.clovaSecret;
   if (cfg.gasUrl)     document.getElementById('gasUrl').value     = cfg.gasUrl;
+  if (cfg.geminiKey)  document.getElementById('geminiKey').value  = cfg.geminiKey;
 
   if (cfg.clovaUrl && cfg.clovaSecret) {
     const b = document.getElementById('ocrBadge');

@@ -289,3 +289,47 @@ GAS 트리거 (매 1분)
 **원인 3 — 알레르기 번호 정규식 자리수 제한**
 - `{1,12}` 상한으로 13자리 이상 번호열 잘림
 - **수정**: `\d+` (무제한)으로 변경
+
+---
+
+## 2026-04-08 Gemini AI 보조 계란 감지 + 마카로니샐러드 누락 수정
+
+### 마카로니샐러드 미감지 버그
+**증상**: 마카로니샐러드(알레르기 1번·5번)가 계란 없음으로 처리됨
+
+**원인 1 — `EGG_FOOD_KW` 누락**
+- `마카로니샐러드`, `감자샐러드` 미등록 (마요네즈 기반이라 계란 포함)
+- **수정**: `EGG_FOOD_KW`에 두 항목 추가
+
+**원인 2 — OCR이 "1 5"를 "15"로 합쳐 인식 (사용자 추측 확인됨)**
+- 알레르기 번호 "1 5"가 "15"로 인식 → `parseAllergenStr("15")` = [15](닭고기) → 계란 미감지
+- 알레르기 번호 체계 자체의 구조적 모호성 ("15" = 닭고기 vs "1+5" = 계란+대두 구분 불가)
+
+### Gemini AI 하이브리드 감지 도입
+**설계 의도**: 키워드 목록은 유지보수가 필요하므로, 미감지 메뉴를 AI가 자동으로 추가 판단하는 하이브리드 방식 도입
+
+**파일**: `Code.gs`, `index.html`
+
+**흐름**:
+```
+OCR 파싱 (기존: 키워드 + 알레르기 번호)
+  → 계란 미감지 날의 음식명만 추출
+  → GAS /checkEgg 엔드포인트 → Gemini API 질의
+  → 결과를 Google Sheets `eggCache`에 저장 (동일 메뉴 재등장 시 API 호출 없음)
+  → pendingMonthly 업데이트 → 화면 표시 (AI 감지 항목에 🤖 배지)
+```
+
+**GAS 추가**:
+- `getConfig()` / `saveConfig()`: `geminiKey` 추가
+- `getEggCacheSheet()`: `eggCache` 시트 자동 생성
+- `checkEggBatch(foods)`: 캐시 확인 후 미캐시 항목만 Gemini 질의
+- `queryGeminiForEgg(foods, apiKey)`: `gemini-1.5-flash-latest` 호출, temperature=0
+- `doPost`: `'checkEgg'` 타입 추가
+
+**index.html 추가**:
+- Gemini 설정 카드 (설정 탭 — CLOVA 카드 다음)
+- `saveGeminiSettings()`: 로컬 저장 + GAS 동기화
+- `extractFoodNamesFromRaw(rawText)`: rawText에서 한글 음식명 추출
+- `checkEggByAI(foodNames)`: GAS 프록시 via `checkEgg` 엔드포인트
+- `analyzeMonthly()`: OCR 파싱 후 AI 후처리 단계 추가
+- `showMonthlyResult()`: AI 감지 항목에 🤖 표시

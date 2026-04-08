@@ -12,6 +12,7 @@ function getConfig() {
     tgChatIds:   JSON.parse(props.getProperty('tgChatIds') || '[]'),
     clovaUrl:    props.getProperty('clovaUrl')    || '',
     clovaSecret: props.getProperty('clovaSecret') || '',
+    geminiKey:   props.getProperty('geminiKey')   || '',
   };
 }
 
@@ -20,6 +21,7 @@ function saveConfig(cfg) {
   if (cfg.tgToken)     props.setProperty('tgToken',     cfg.tgToken);
   if (cfg.clovaUrl)    props.setProperty('clovaUrl',    cfg.clovaUrl);
   if (cfg.clovaSecret) props.setProperty('clovaSecret', cfg.clovaSecret);
+  if (cfg.geminiKey)   props.setProperty('geminiKey',   cfg.geminiKey);
 }
 
 // 기기별 chat ID 등록 (중복 없이 추가)
@@ -100,6 +102,11 @@ function doPost(e) {
       const result = callClovaOcr(data.imageBase64, data.mimeType);
       return ContentService
         .createTextOutput(JSON.stringify(result))
+        .setMimeType(ContentService.MimeType.JSON);
+    } else if (data.type === 'checkEgg') {
+      const results = checkEggBatch(data.foods || []);
+      return ContentService
+        .createTextOutput(JSON.stringify({ ok: true, results }))
         .setMimeType(ContentService.MimeType.JSON);
     }
     return ok();
@@ -456,6 +463,101 @@ function sendDailyNotif() {
   const msg = `🥚 어린이집 계란 알림\n\n${todaySection}\n\n${tomorrowSection}\n\n🔗 https://jinmakgang-ship-it.github.io/egg-finder/`;
 
   chatIds.forEach(function(id) { sendTelegram(cfg.tgToken, id, msg); });
+}
+
+/* ══════════════════════════════════════════
+   Gemini AI 계란 검사 (키워드·번호로 감지 못한 메뉴 보조)
+══════════════════════════════════════════ */
+
+/** 계란 검사 결과 캐시 시트 (재호출 방지) */
+function getEggCacheSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sh = ss.getSheetByName('eggCache');
+  if (!sh) {
+    sh = ss.insertSheet('eggCache');
+    sh.appendRow(['food', 'hasEgg', 'checkedAt']);
+  }
+  return sh;
+}
+
+/**
+ * 음식 이름 배열을 받아 계란 포함 여부를 반환 {음식명: true/false}
+ * - 캐시 시트에 있으면 API 호출 없이 즉시 반환
+ * - 없는 항목만 Gemini 호출 후 캐시에 저장
+ */
+function checkEggBatch(foods) {
+  if (!foods || !foods.length) return {};
+  const cfg = getConfig();
+  if (!cfg.geminiKey) return {};
+
+  // 캐시 로드
+  const sh = getEggCacheSheet();
+  const rows = sh.getDataRange().getValues();
+  const cache = {};
+  for (let i = 1; i < rows.length; i++) {
+    if (rows[i][0]) cache[rows[i][0]] = rows[i][1] === true || rows[i][1] === 'true';
+  }
+
+  const result = {};
+  const toQuery = [];
+  for (const f of foods) {
+    if (f in cache) result[f] = cache[f];
+    else toQuery.push(f);
+  }
+
+  if (toQuery.length) {
+    const aiResult = queryGeminiForEgg(toQuery, cfg.geminiKey);
+    for (const [f, hasEgg] of Object.entries(aiResult)) {
+      result[f] = hasEgg;
+      sh.appendRow([f, hasEgg, new Date().toISOString()]);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Gemini에 음식 목록을 보내 계란 포함 여부를 질의
+ * 반환: {음식명: true/false}
+ */
+function queryGeminiForEgg(foods, apiKey) {
+  const prompt =
+    '아래 음식 이름 목록에서 계란(달걀·알류)이 주재료 또는 부재료(마요네즈·계란물 포함)로 들어가는 음식 이름만 골라' +
+    ' JSON 배열로 반환하세요. 확실하지 않으면 제외하세요. JSON 배열만 출력, 설명 없이.\n\n음식 목록: ' +
+    foods.join(', ');
+
+  try {
+    const res = UrlFetchApp.fetch(
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=' + apiKey,
+      {
+        method: 'post',
+        contentType: 'application/json',
+        payload: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0, maxOutputTokens: 512 },
+        }),
+        muteHttpExceptions: true,
+      }
+    );
+    const data = JSON.parse(res.getContentText());
+    const raw  = (data.candidates?.[0]?.content?.parts?.[0]?.text || '[]').trim();
+    const match = raw.match(/\[[\s\S]*?\]/);
+    const eggList = match ? JSON.parse(match[0]) : [];
+
+    const out = {};
+    for (const f of foods) {
+      out[f] = eggList.some(function(e) {
+        const es = String(e).trim();
+        return es === f || f.includes(es) || es.includes(f);
+      });
+    }
+    return out;
+  } catch (err) {
+    Logger.log('Gemini 오류: ' + err.message);
+    const out = {};
+    for (const f of foods) out[f] = false;
+    return out;
+  }
 }
 
 /* ── UTILS ── */
